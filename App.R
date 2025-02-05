@@ -41,14 +41,15 @@ ui <- fluidPage(
                     "Pairwise Wilcoxon" = "wilcox"
                   )),
       actionButton("goButton", "Run Analysis"),
-      downloadButton("downloadPlot", "Download High-Res Plot"),
-      downloadButton("downloadResults", "Download Results")
+      downloadButton("downloadPlot", "Download Plot"),
+      downloadButton("downloadResults", "Download Text Results")
     ),
     
     mainPanel(
       plotOutput("growthPlot"),
       tableOutput("statsTable"),
-      verbatimTextOutput("regressionEquations")  
+      tableOutput("regressionEquations"),  # Plain table for regression equations
+      tableOutput("growthMetrics")         # Plain table for doubling time and growth rate
     )
   )
 )
@@ -167,7 +168,7 @@ server <- function(input, output, session) {
         .groups = 'drop'
       )
     
-    # Generate Regression Equations
+    # Generate Polynomial Regression Equations (for display)
     regressionEquations <- summarizedData %>%
       group_by(group) %>%
       do({
@@ -201,16 +202,46 @@ server <- function(input, output, session) {
         }
       })
     
-    # Render Regression Equations
-    output$regressionEquations <- renderPrint({
-      cat("Regression Equations:\n")
-      if(nrow(regressionEquations) == 0){
-        cat("No regression equations available.\n")
-      } else {
-        apply(regressionEquations, 1, function(row) {
-          cat(row["group"], ":", row["equation"], "\n")
-        })
-      }
+    # Render Polynomial Regression Equations in the UI as a plain table
+    output$regressionEquations <- renderTable({
+      regressionEquations
+    })
+    
+    # Calculate Doubling Time and Growth Rate (Exponential Model)
+    doublingGrowth <- summarizedData %>%
+      group_by(group) %>%
+      do({
+        # We require positive mean_growth to take logarithms and at least 2 time points
+        if(min(.$mean_growth, na.rm = TRUE) > 0 && n_distinct(.$time) >= 2) {
+          expModel <- tryCatch(lm(log(mean_growth) ~ time, data = .), error = function(e) NULL)
+          if (!is.null(expModel)) {
+            slope <- coef(expModel)["time"]
+            growth_rate <- slope
+            doubling_time <- log(2) / slope
+            data.frame(
+              group = unique(.$group),
+              growth_rate = growth_rate,
+              doubling_time = doubling_time
+            )
+          } else {
+            data.frame(
+              group = unique(.$group),
+              growth_rate = NA,
+              doubling_time = NA
+            )
+          }
+        } else {
+          data.frame(
+            group = unique(.$group),
+            growth_rate = NA,
+            doubling_time = NA
+          )
+        }
+      })
+    
+    # Render Doubling Time and Growth Rate in the UI as a plain table
+    output$growthMetrics <- renderTable({
+      doublingGrowth
     })
     
     # Perform Selected Statistical Test
@@ -282,12 +313,11 @@ server <- function(input, output, session) {
       return(NULL)
     }
     
-    # Render Statistical Test Results
+    # Render Statistical Test Results in the UI
     output$statsTable <- renderTable({
       if (input$statTest %in% c("anova", "welch.anova", "kruskal")) {
         if (input$statTest == "anova") {
           result <- summary(statsResult)[[1]]
-          # Check if it's ANOVA or another type
           if ("Pr(>F)" %in% colnames(result)) {
             data.frame(
               Term = rownames(result),
@@ -324,18 +354,14 @@ server <- function(input, output, session) {
           )
         }
       } else {
-        # For t-test and Wilcoxon
         if (input$statTest == "wilcox") {
-          # Pairwise Wilcoxon
           result <- statsResult$p.value
-          # Melt the matrix for display
           df <- as.data.frame(as.table(result))
           colnames(df) <- c("Group 1", "Group 2", "p-value")
           df <- df[!is.na(df$`p-value`), ]
           df$`p-value` <- signif(df$`p-value`, 3)
           return(df)
         } else {
-          # T-test
           data.frame(
             Statistic = names(statsResult$statistic),
             Value = round(as.numeric(statsResult$statistic), 3),
@@ -348,19 +374,14 @@ server <- function(input, output, session) {
       }
     }, rownames = FALSE)
     
-    # --- Revised Section: Handle Pairwise Comparisons for Annotation ---
+    # --- Handle Pairwise Comparisons for Annotation ---
     pairwise_comparisons <- NULL
     if (input$statTest == "anova") {
-      # Perform ANOVA and Tukey's HSD
       anova_model <- aov(growth ~ group, data = growthData)
       tukey_results <- TukeyHSD(anova_model)$group
-      
-      # Create a matrix to store p-values
       groups <- levels(growthData$group)
       pairwise_comparisons <- matrix(NA, nrow = length(groups), ncol = length(groups), 
                                      dimnames = list(groups, groups))
-      
-      # Fill the matrix with adjusted p-values from Tukey's HSD
       for (comparison in rownames(tukey_results)) {
         groups_pair <- unlist(strsplit(comparison, "-"))
         if (length(groups_pair) == 2) {
@@ -368,10 +389,9 @@ server <- function(input, output, session) {
           g2 <- groups_pair[2]
           p_adj <- tukey_results[comparison, "p adj"]
           pairwise_comparisons[g1, g2] <- p_adj
-          pairwise_comparisons[g2, g1] <- p_adj  # Ensure symmetry
+          pairwise_comparisons[g2, g1] <- p_adj
         }
       }
-      
     } else if (input$statTest == "kruskal") {
       pairwise_comparisons <- statsResult$p.value
       if(!is.matrix(pairwise_comparisons)){
@@ -389,14 +409,12 @@ server <- function(input, output, session) {
     if (!is.null(pairwise_comparisons)) {
       groups <- levels(growthData$group)
       group_combos <- combn(groups, 2, simplify = FALSE)
-      # Determine a vertical offset based on the error bar height (adjust multiplier as needed)
       offset <- max(summarizedData$stderr, na.rm = TRUE) * 2  
       annotation_counter <- 0
       
       for (combo in group_combos) {
         group1 <- combo[1]
         group2 <- combo[2]
-        # Check if the matrix contains a p-value for this pair
         if(all(c(group1, group2) %in% rownames(pairwise_comparisons))){
           p_val <- pairwise_comparisons[group1, group2]
         } else {
@@ -405,7 +423,6 @@ server <- function(input, output, session) {
         if (!is.na(p_val)) {
           annotation_label <- significance_labels(p_val)
           annotation_counter <- annotation_counter + 1
-          # Place each annotation at the middle of the time range; adjust vertical position so they stack
           x_position <- mean(range(summarizedData$time))
           y_position <- max(summarizedData$mean_growth, na.rm = TRUE) + offset * annotation_counter
           annotations <- rbind(annotations, data.frame(
@@ -419,16 +436,15 @@ server <- function(input, output, session) {
     
     # Render Growth Plot with Static Significance Annotations
     output$growthPlot <- renderPlot({
-      req(summarizedData)  # Ensure data is available
+      req(summarizedData)
       
       p <- ggplot(summarizedData, aes(x = time, y = mean_growth, color = group)) +
         geom_point(size = 3) +  
         geom_smooth(method = "lm", formula = y ~ poly(x, 2), se = FALSE, linewidth = 1) +  
         geom_errorbar(aes(ymin = mean_growth - stderr, ymax = mean_growth + stderr), width = 0.2) +  
-        labs(x = "Time", y = "Mean Growth", color = "Group") +
+        labs(x = "Time (Hours)", y = "Mean Growth (Millions of Cells)", color = "Group") +
         theme_light()
       
-      # Add the significance annotations if any exist
       if (nrow(annotations) > 0) {
         p <- p + geom_text(
           data = annotations, 
@@ -442,16 +458,15 @@ server <- function(input, output, session) {
       p
     })
     
-    # Enable Downloading of Plot
+    # Revised Download Handler for Plot
     output$downloadPlot <- downloadHandler(
       filename = function() { "growth_plot.png" },
       content = function(file) {
-        png(file, width = 1600, height = 1200, res = 150)
         p <- ggplot(summarizedData, aes(x = time, y = mean_growth, color = group)) +
           geom_point(size = 3) +  
           geom_smooth(method = "lm", formula = y ~ poly(x, 2), se = FALSE, linewidth = 1) +  
           geom_errorbar(aes(ymin = mean_growth - stderr, ymax = mean_growth + stderr), width = 0.2) +  
-          labs(x = "Time", y = "Mean Growth", color = "Group") +
+          labs(x = "Time (Hours)", y = "Mean Growth (Millions of Cells)", color = "Group") +
           theme_light()
         
         if (nrow(annotations) > 0) {
@@ -463,12 +478,11 @@ server <- function(input, output, session) {
             inherit.aes = FALSE
           )
         }
-        print(p)
-        dev.off()
+        ggsave(filename = file, plot = p, dpi = 800, width = 12, height = 8)
       }
     )
     
-    # Prepare and Enable Downloading of Results
+    # Prepare and Enable Downloading of Results (including doubling time and growth rate)
     output$downloadResults <- downloadHandler(
       filename = function() { "analysis_results.txt" },
       content = function(file) {
@@ -485,8 +499,10 @@ server <- function(input, output, session) {
         } else {
           print(statsResult)
         }
-        cat("\nRegression Equations:\n")
+        cat("\nPolynomial Regression Equations:\n")
         print(regressionEquations)
+        cat("\nDoubling Time and Growth Rate (Exponential Model):\n")
+        print(doublingGrowth)
         sink()
       }
     )
@@ -496,5 +512,7 @@ server <- function(input, output, session) {
 
 # Run the Shiny App
 shinyApp(ui = ui, server = server)
+
+
 
 
