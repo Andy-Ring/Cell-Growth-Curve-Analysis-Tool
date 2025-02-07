@@ -60,8 +60,8 @@ ui <- fluidPage(
       downloadButton("downloadResults", "Download Text Results"),
       br(),
       br(),
-      tags$p("Created by Andrew Ring"),
-      tags$p("Version 1.0.0 | February, 7th 2025")
+      tags$p("Created by Andy Ring"),
+      tags$p("Version 1.0.1 | February, 7th 2025")
     ), 
     
     mainPanel(
