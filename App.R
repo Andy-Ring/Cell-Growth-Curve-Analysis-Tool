@@ -7,7 +7,9 @@ library(stats)
 library(ggpubr)  
 library(multcomp)
 library(bslib)
+library(thematic)
 
+thematic_shiny()
 # Helper Function to Determine Significance Labels
 significance_labels <- function(p_value) {
   if (is.na(p_value)) {
@@ -27,7 +29,9 @@ significance_labels <- function(p_value) {
 ui <- fluidPage(
   # Define a custom Bootstrap theme using bslib
   theme = bs_theme(                     
-    bootswatch = "slate"  # Bootswatch theme for a modern look
+    bootswatch = "darkly",
+    secondary = "#BA0C2F",
+   "table-bg" = "primary"
   ),
   
   titlePanel("Cell Growth Analysis Tool"),
@@ -61,19 +65,25 @@ ui <- fluidPage(
       br(),
       br(),
       tags$p("Created by Andy Ring"),
-      tags$p("Version 1.0.1 | February, 7th 2025")
+      tags$p("Version 1.0.2 | February, 7th 2025")
     ), 
     
     mainPanel(
       layout_columns(
-        card(card_header("Growth Plot"),
+        
+        card(card_title("Growth Plot"),
              plotOutput("growthPlot")),
-        card(card_header("Statistical Test Results"),
-             tableOutput("statsTable")),
-        card(card_header("Regression Equations"),
-             tableOutput("regressionEquations")),  # Table for regression equations
-        card(card_header("Growth Calculations"),
-             tableOutput("growthMetrics")),  # Table for doubling time and growth rate
+        
+        card(card_title("Statistical Test Results"),
+             tableOutput("statsTable")
+             ),
+        
+        card(card_title("Regression Equations"),
+             tableOutput("regressionEquations")),
+        
+        card(card_title("Growth Calculations"),
+             tableOutput("growthMetrics")),
+        
         col_widths = c(12, 4, 4, 4)
       )
     )
@@ -82,7 +92,6 @@ ui <- fluidPage(
 
 # Server Logic
 server <- function(input, output, session) {
-  
   # Function to Create Downloadable Template
   createTemplate <- function() {
     data.frame(
@@ -380,7 +389,9 @@ server <- function(input, output, session) {
         y = input$yLabel,
         color = "Group"
       ) +
-      theme_light()
+      theme(axis.title = element_text(size = 15, face = "bold"),
+            plot.title = element_text(size = 30, face = "bold"))
+      
     
     if (nrow(res$annotations) > 0) {
       p <- p + geom_text(
@@ -492,6 +503,8 @@ server <- function(input, output, session) {
           y = input$yLabel,
           color = "Group"
         ) +
+        theme(axis.title = element_text(size = 15, face = "bold"),
+              plot.title = element_text(size = 30, face = "bold"))+
         theme_light()
       
       if (nrow(res$annotations) > 0) {
