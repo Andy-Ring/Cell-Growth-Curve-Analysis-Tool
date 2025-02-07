@@ -5,7 +5,8 @@ library(dplyr)
 library(car)  
 library(stats)
 library(ggpubr)  
-library(multcomp)  # For multiple comparisons, if needed
+library(multcomp)
+library(bslib)
 
 # Helper Function to Determine Significance Labels
 significance_labels <- function(p_value) {
@@ -22,34 +23,59 @@ significance_labels <- function(p_value) {
   }
 }
 
-# UI Definition
+# Format the UI with bslib theme customization
 ui <- fluidPage(
-  titlePanel("Cell Growth Analysis"),
+  # Define a custom Bootstrap theme using bslib
+  theme = bs_theme(                     
+    bootswatch = "slate"  # Bootswatch theme for a modern look
+  ),
+  
+  titlePanel("Cell Growth Analysis Tool"),
   
   sidebarLayout(
     sidebarPanel(
+      HTML('<img src="logo.png" width="100%" height="auto">'),
       downloadButton("downloadTemplate", "Download Template"),
       fileInput("data", "Upload Growth Data (CSV)", accept = ".csv"),
       actionButton("recommendTest", "Recommend Best Test"),
       textOutput("recommendedTest"),
       selectInput("statTest", "Select Statistical Test", 
                   choices = c(
+                    "None" = "none",
                     "T-test" = "t.test", 
                     "ANOVA" = "anova", 
                     "Welch's ANOVA" = "welch.anova", 
                     "Kruskal-Wallis" = "kruskal",
                     "Pairwise Wilcoxon" = "wilcox"
-                  )),
+                  )
+      ),
+      # Inputs for plot customization
+      textInput("plotTitle", "Plot Title", value = "Cell Growth Over Time"),
+      textInput("xLabel", "X-axis Label", value = "Time (Hours)"),
+      textInput("yLabel", "Y-axis Label", value = "Mean Growth (Millions of Cells)"),
       actionButton("goButton", "Run Analysis"),
       downloadButton("downloadPlot", "Download Plot"),
-      downloadButton("downloadResults", "Download Text Results")
-    ),
+      br(),
+      br(),
+      downloadButton("downloadResults", "Download Text Results"),
+      br(),
+      br(),
+      tags$p("Created by Andrew Ring"),
+      tags$p("Version 1.0.0 | February, 7th 2025")
+    ), 
     
     mainPanel(
-      plotOutput("growthPlot"),
-      tableOutput("statsTable"),
-      tableOutput("regressionEquations"),  # Plain table for regression equations
-      tableOutput("growthMetrics")         # Plain table for doubling time and growth rate
+      layout_columns(
+        card(card_header("Growth Plot"),
+             plotOutput("growthPlot")),
+        card(card_header("Statistical Test Results"),
+             tableOutput("statsTable")),
+        card(card_header("Regression Equations"),
+             tableOutput("regressionEquations")),  # Table for regression equations
+        card(card_header("Growth Calculations"),
+             tableOutput("growthMetrics")),  # Table for doubling time and growth rate
+        col_widths = c(12, 4, 4, 4)
+      )
     )
   )
 )
@@ -103,15 +129,16 @@ server <- function(input, output, session) {
   # Recommend Best Statistical Test
   observeEvent(input$recommendTest, {
     growthData <- data()
-    req(growthData)  # Ensure data is available
+    req(growthData)
     
     groups <- unique(growthData$group)
     recommendation <- ""
     
-    if (length(groups) == 2) {
-      # Check Normality
+    if (length(groups) == 1) {
+      bestTest <- "None"
+      recommendation <- "No statistical test recommended because there is only one group present."
+    } else if (length(groups) == 2) {
       normTest <- tryCatch(shapiro.test(growthData$growth)$p.value, error = function(e) NA)
-      # Check Homogeneity of Variance
       varTest <- tryCatch(leveneTest(growth ~ group, data = growthData)$`Pr(>F)`[1], error = function(e) NA)
       
       if (!is.na(normTest) && normTest > 0.05) {
@@ -126,9 +153,7 @@ server <- function(input, output, session) {
         bestTest <- "Wilcoxon Test"
         recommendation <- "Wilcoxon Test because the data is not normally distributed and has 2 groups."
       }
-      
     } else {
-      # More than 2 groups
       normTest <- tryCatch(shapiro.test(growthData$growth)$p.value, error = function(e) NA)
       varTest <- tryCatch(leveneTest(growth ~ group, data = growthData)$`Pr(>F)`[1], error = function(e) NA)
       
@@ -151,12 +176,10 @@ server <- function(input, output, session) {
     })
   })
   
-  # Run Analysis upon Clicking "Run Analysis"
-  observeEvent(input$goButton, {
+  # Use eventReactive to run the analysis when "Run Analysis" is clicked.
+  analysisResults <- eventReactive(input$goButton, {
+    req(data())
     growthData <- data()
-    req(growthData)  # Ensure data is available
-    
-    # Convert group to factor (redundant if already done in data())
     growthData$group <- as.factor(growthData$group)
     
     # Summarize Data
@@ -172,7 +195,6 @@ server <- function(input, output, session) {
     regressionEquations <- summarizedData %>%
       group_by(group) %>%
       do({
-        # Ensure enough data points for polynomial regression
         if(n_distinct(.$time) >= 3) {
           model <- tryCatch(lm(mean_growth ~ poly(time, 2), data = .), error = function(e) NULL)
           if (!is.null(model)) {
@@ -202,16 +224,10 @@ server <- function(input, output, session) {
         }
       })
     
-    # Render Polynomial Regression Equations in the UI as a plain table
-    output$regressionEquations <- renderTable({
-      regressionEquations
-    })
-    
     # Calculate Doubling Time and Growth Rate (Exponential Model)
     doublingGrowth <- summarizedData %>%
       group_by(group) %>%
       do({
-        # We require positive mean_growth to take logarithms and at least 2 time points
         if(min(.$mean_growth, na.rm = TRUE) > 0 && n_distinct(.$time) >= 2) {
           expModel <- tryCatch(lm(log(mean_growth) ~ time, data = .), error = function(e) NULL)
           if (!is.null(expModel)) {
@@ -239,142 +255,47 @@ server <- function(input, output, session) {
         }
       })
     
-    # Render Doubling Time and Growth Rate in the UI as a plain table
-    output$growthMetrics <- renderTable({
-      doublingGrowth
-    })
-    
-    # Perform Selected Statistical Test
+    # Perform Selected Statistical Test (skip if "None" is selected)
     statsResult <- switch(input$statTest,
+                          "none" = NULL,
                           "t.test" = {
                             if(length(levels(growthData$group)) == 2){
                               t.test(growth ~ group, data = growthData)
                             } else {
-                              showModal(modalDialog(
-                                title = "Statistical Test Error",
-                                "T-test is selected but there are more than 2 groups. Please select an appropriate test.",
-                                easyClose = TRUE
-                              ))
-                              return(NULL)
+                              NULL
                             }
                           },
                           "anova" = {
                             if(length(levels(growthData$group)) > 1){
                               aov(growth ~ group, data = growthData)
                             } else {
-                              showModal(modalDialog(
-                                title = "Statistical Test Error",
-                                "ANOVA requires more than one group.",
-                                easyClose = TRUE
-                              ))
-                              return(NULL)
+                              NULL
                             }
                           },
                           "welch.anova" = {
                             if(length(levels(growthData$group)) > 1){
                               oneway.test(growth ~ group, data = growthData, var.equal = FALSE)
                             } else {
-                              showModal(modalDialog(
-                                title = "Statistical Test Error",
-                                "Welch's ANOVA requires more than one group.",
-                                easyClose = TRUE
-                              ))
-                              return(NULL)
+                              NULL
                             }
                           },
                           "kruskal" = {
                             if(length(levels(growthData$group)) > 1){
                               kruskal.test(growth ~ group, data = growthData)
                             } else {
-                              showModal(modalDialog(
-                                title = "Statistical Test Error",
-                                "Kruskal-Wallis Test requires more than one group.",
-                                easyClose = TRUE
-                              ))
-                              return(NULL)
+                              NULL
                             }
                           },
                           "wilcox" = {
                             if(length(levels(growthData$group)) > 1){
                               pairwise.wilcox.test(growthData$growth, growthData$group, p.adjust.method = "bonferroni")
                             } else {
-                              showModal(modalDialog(
-                                title = "Statistical Test Error",
-                                "Pairwise Wilcoxon Test requires more than one group.",
-                                easyClose = TRUE
-                              ))
-                              return(NULL)
+                              NULL
                             }
                           }
     )
     
-    # Check if statsResult is NULL due to earlier errors
-    if(is.null(statsResult)){
-      return(NULL)
-    }
-    
-    # Render Statistical Test Results in the UI
-    output$statsTable <- renderTable({
-      if (input$statTest %in% c("anova", "welch.anova", "kruskal")) {
-        if (input$statTest == "anova") {
-          result <- summary(statsResult)[[1]]
-          if ("Pr(>F)" %in% colnames(result)) {
-            data.frame(
-              Term = rownames(result),
-              `F value` = round(result$`F value`, 3),
-              `Pr(>F)` = signif(result$`Pr(>F)`, 3),
-              row.names = NULL
-            )
-          } else {
-            data.frame(
-              Statistic = names(statsResult$statistic),
-              Value = round(as.numeric(statsResult$statistic), 3),
-              `p-value` = signif(statsResult$p.value, 3),
-              row.names = NULL
-            )
-          }
-        } else if (input$statTest == "welch.anova") {
-          result <- statsResult
-          data.frame(
-            `Statistic` = "F",
-            `Value` = round(result$statistic, 3),
-            `p-value` = signif(result$p.value, 3),
-            `DF1` = round(result$parameter[1], 3),
-            `DF2` = round(result$parameter[2], 3),
-            row.names = NULL
-          )
-        } else if (input$statTest == "kruskal") {
-          result <- statsResult
-          data.frame(
-            `Statistic` = "Chi-squared",
-            `Value` = round(result$statistic, 3),
-            `p-value` = signif(result$p.value, 3),
-            `DF` = result$parameter,
-            row.names = NULL
-          )
-        }
-      } else {
-        if (input$statTest == "wilcox") {
-          result <- statsResult$p.value
-          df <- as.data.frame(as.table(result))
-          colnames(df) <- c("Group 1", "Group 2", "p-value")
-          df <- df[!is.na(df$`p-value`), ]
-          df$`p-value` <- signif(df$`p-value`, 3)
-          return(df)
-        } else {
-          data.frame(
-            Statistic = names(statsResult$statistic),
-            Value = round(as.numeric(statsResult$statistic), 3),
-            `p-value` = signif(statsResult$p.value, 3),
-            conf.int.lower = round(statsResult$conf.int[1], 3),
-            conf.int.upper = round(statsResult$conf.int[2], 3),
-            row.names = NULL
-          )
-        }
-      }
-    }, rownames = FALSE)
-    
-    # --- Handle Pairwise Comparisons for Annotation ---
+    # Handle Pairwise Comparisons for Annotation
     pairwise_comparisons <- NULL
     if (input$statTest == "anova") {
       anova_model <- aov(growth ~ group, data = growthData)
@@ -434,20 +355,148 @@ server <- function(input, output, session) {
       }
     }
     
-    # Render Growth Plot with Static Significance Annotations
-    output$growthPlot <- renderPlot({
-      req(summarizedData)
+    # Return all computed results as a list
+    list(
+      summarizedData = summarizedData,
+      regressionEquations = regressionEquations,
+      doublingGrowth = doublingGrowth,
+      statsResult = statsResult,
+      annotations = annotations
+    )
+  })
+  
+  # Define Outputs using the results from analysisResults()
+  output$growthPlot <- renderPlot({
+    res <- analysisResults()
+    req(res)
+    
+    p <- ggplot(res$summarizedData, aes(x = time, y = mean_growth, color = group)) +
+      geom_point(size = 3) +  
+      geom_smooth(method = "lm", formula = y ~ poly(x, 2), se = FALSE, linewidth = 1) +  
+      geom_errorbar(aes(ymin = mean_growth - stderr, ymax = mean_growth + stderr), width = 0.2) +
+      labs(
+        title = input$plotTitle,
+        x = input$xLabel,
+        y = input$yLabel,
+        color = "Group"
+      ) +
+      theme_light()
+    
+    if (nrow(res$annotations) > 0) {
+      p <- p + geom_text(
+        data = res$annotations, 
+        aes(x = x, y = y, label = label), 
+        size = 6, 
+        vjust = -0.5,
+        inherit.aes = FALSE
+      )
+    }
+    
+    p
+  })
+  
+  output$regressionEquations <- renderTable({
+    res <- analysisResults()
+    req(res)
+    res$regressionEquations
+  })
+  
+  output$growthMetrics <- renderTable({
+    res <- analysisResults()
+    req(res)
+    res$doublingGrowth
+  })
+  
+  output$statsTable <- renderTable({
+    # If "None" is selected, display a message.
+    if (input$statTest == "none") {
+      return(data.frame(Message = "No statistical test selected."))
+    }
+    
+    res <- analysisResults()
+    req(res)
+    
+    if (input$statTest %in% c("anova", "welch.anova", "kruskal")) {
+      if (input$statTest == "anova") {
+        result <- summary(res$statsResult)[[1]]
+        if ("Pr(>F)" %in% colnames(result)) {
+          data.frame(
+            Term = rownames(result),
+            `F value` = round(result$`F value`, 3),
+            `Pr(>F)` = signif(result$`Pr(>F)`, 3),
+            row.names = NULL
+          )
+        } else {
+          data.frame(
+            Statistic = names(res$statsResult$statistic),
+            Value = round(as.numeric(res$statsResult$statistic), 3),
+            `p-value` = signif(res$statsResult$p.value, 3),
+            row.names = NULL
+          )
+        }
+      } else if (input$statTest == "welch.anova") {
+        result <- res$statsResult
+        data.frame(
+          `Statistic` = "F",
+          `Value` = round(result$statistic, 3),
+          `p-value` = signif(result$p.value, 3),
+          `DF1` = round(result$parameter[1], 3),
+          `DF2` = round(result$parameter[2], 3),
+          row.names = NULL
+        )
+      } else if (input$statTest == "kruskal") {
+        result <- res$statsResult
+        data.frame(
+          `Statistic` = "Chi-squared",
+          `Value` = round(result$statistic, 3),
+          `p-value` = signif(result$p.value, 3),
+          `DF` = result$parameter,
+          row.names = NULL
+        )
+      }
+    } else {
+      if (input$statTest == "wilcox") {
+        result <- res$statsResult$p.value
+        df <- as.data.frame(as.table(result))
+        colnames(df) <- c("Group 1", "Group 2", "p-value")
+        df <- df[!is.na(df$`p-value`), ]
+        df$`p-value` <- signif(df$`p-value`, 3)
+        return(df)
+      } else {
+        data.frame(
+          Statistic = names(res$statsResult$statistic),
+          Value = round(as.numeric(res$statsResult$statistic), 3),
+          `p-value` = signif(res$statsResult$p.value, 3),
+          conf.int.lower = round(res$statsResult$conf.int[1], 3),
+          conf.int.upper = round(res$statsResult$conf.int[2], 3),
+          row.names = NULL
+        )
+      }
+    }
+  })
+  
+  # Download Handlers
+  output$downloadPlot <- downloadHandler(
+    filename = function() { "growth_plot.png" },
+    content = function(file) {
+      res <- analysisResults()
+      req(res)
       
-      p <- ggplot(summarizedData, aes(x = time, y = mean_growth, color = group)) +
+      p <- ggplot(res$summarizedData, aes(x = time, y = mean_growth, color = group)) +
         geom_point(size = 3) +  
         geom_smooth(method = "lm", formula = y ~ poly(x, 2), se = FALSE, linewidth = 1) +  
-        geom_errorbar(aes(ymin = mean_growth - stderr, ymax = mean_growth + stderr), width = 0.2) +  
-        labs(x = "Time (Hours)", y = "Mean Growth (Millions of Cells)", color = "Group") +
+        geom_errorbar(aes(ymin = mean_growth - stderr, ymax = mean_growth + stderr), width = 0.2) +
+        labs(
+          title = input$plotTitle,
+          x = input$xLabel,
+          y = input$yLabel,
+          color = "Group"
+        ) +
         theme_light()
       
-      if (nrow(annotations) > 0) {
+      if (nrow(res$annotations) > 0) {
         p <- p + geom_text(
-          data = annotations, 
+          data = res$annotations, 
           aes(x = x, y = y, label = label), 
           size = 6, 
           vjust = -0.5,
@@ -455,59 +504,38 @@ server <- function(input, output, session) {
         )
       }
       
-      p
-    })
-    
-    # Revised Download Handler for Plot
-    output$downloadPlot <- downloadHandler(
-      filename = function() { "growth_plot.png" },
-      content = function(file) {
-        p <- ggplot(summarizedData, aes(x = time, y = mean_growth, color = group)) +
-          geom_point(size = 3) +  
-          geom_smooth(method = "lm", formula = y ~ poly(x, 2), se = FALSE, linewidth = 1) +  
-          geom_errorbar(aes(ymin = mean_growth - stderr, ymax = mean_growth + stderr), width = 0.2) +  
-          labs(x = "Time (Hours)", y = "Mean Growth (Millions of Cells)", color = "Group") +
-          theme_light()
-        
-        if (nrow(annotations) > 0) {
-          p <- p + geom_text(
-            data = annotations, 
-            aes(x = x, y = y, label = label), 
-            size = 6, 
-            vjust = -0.5,
-            inherit.aes = FALSE
-          )
-        }
-        ggsave(filename = file, plot = p, dpi = 800, width = 12, height = 8)
-      }
-    )
-    
-    # Prepare and Enable Downloading of Results (including doubling time and growth rate)
-    output$downloadResults <- downloadHandler(
-      filename = function() { "analysis_results.txt" },
-      content = function(file) {
-        sink(file)
-        cat("Statistical Test Results:\n")
-        if (input$statTest %in% c("anova", "welch.anova", "kruskal")) {
-          if (input$statTest == "anova") {
-            print(summary(statsResult))
-          } else {
-            print(statsResult)
-          }
-        } else if (input$statTest == "wilcox") {
-          print(statsResult)
+      ggsave(filename = file, plot = p, dpi = 800, width = 12, height = 8)
+    }
+  )
+  
+  output$downloadResults <- downloadHandler(
+    filename = function() { "analysis_results.txt" },
+    content = function(file) {
+      res <- analysisResults()
+      req(res)
+      
+      sink(file)
+      cat("Statistical Test Results:\n")
+      if (input$statTest == "none") {
+        cat("No statistical test selected.\n")
+      } else if (input$statTest %in% c("anova", "welch.anova", "kruskal")) {
+        if (input$statTest == "anova") {
+          print(summary(res$statsResult))
         } else {
-          print(statsResult)
+          print(res$statsResult)
         }
-        cat("\nPolynomial Regression Equations:\n")
-        print(regressionEquations)
-        cat("\nDoubling Time and Growth Rate (Exponential Model):\n")
-        print(doublingGrowth)
-        sink()
+      } else if (input$statTest == "wilcox") {
+        print(res$statsResult)
+      } else {
+        print(res$statsResult)
       }
-    )
-    
-  })
+      cat("\nPolynomial Regression Equations:\n")
+      print(res$regressionEquations)
+      cat("\nDoubling Time and Growth Rate (Exponential Model):\n")
+      print(res$doublingGrowth)
+      sink()
+    }
+  )
 }
 
 # Run the Shiny App
