@@ -39,7 +39,11 @@ ui <- fluidPage(
   sidebarLayout(
     sidebarPanel(
       HTML('<img src="logo.png" width="100%" height="auto">'),
+      br(),
+      br(),
       downloadButton("downloadTemplate", "Download Template"),
+      br(),
+      br(),
       fileInput("data", "Upload Growth Data (CSV)", accept = ".csv"),
       actionButton("recommendTest", "Recommend Best Test"),
       textOutput("recommendedTest"),
