@@ -10,6 +10,7 @@ library(bslib)
 library(thematic)
 
 thematic_shiny()
+
 # Helper Function to Determine Significance Labels
 significance_labels <- function(p_value) {
   if (is.na(p_value)) {
@@ -27,11 +28,10 @@ significance_labels <- function(p_value) {
 
 # Format the UI with bslib theme customization
 ui <- fluidPage(
-  # Define a custom Bootstrap theme using bslib
-  theme = bs_theme(                     
+  theme = bs_theme(
     bootswatch = "darkly",
     secondary = "#BA0C2F",
-   "table-bg" = "primary"
+    "table-bg" = "primary"
   ),
   
   titlePanel("Cell Growth Analysis Tool"),
@@ -39,14 +39,15 @@ ui <- fluidPage(
   sidebarLayout(
     sidebarPanel(
       HTML('<img src="logo.png" width="100%" height="auto">'),
-      br(),
-      br(),
+      br(), br(),
       downloadButton("downloadTemplate", "Download Template"),
-      br(),
-      br(),
+      tags$hr(),
       fileInput("data", "Upload Growth Data (CSV)", accept = ".csv"),
+      tags$hr(),
+      h4("Statistical Testing"),
       actionButton("recommendTest", "Recommend Best Test"),
       textOutput("recommendedTest"),
+      br(),
       selectInput("statTest", "Select Statistical Test", 
                   choices = c(
                     "None" = "none",
@@ -58,37 +59,36 @@ ui <- fluidPage(
                   )
       ),
       # Inputs for plot customization
+      tags$hr(),
+      h4("Plot Customization"),
       textInput("plotTitle", "Plot Title", value = "Cell Growth Over Time"),
       textInput("xLabel", "X-axis Label", value = "Time (Hours)"),
       textInput("yLabel", "Y-axis Label", value = "Mean Growth (Millions of Cells)"),
+      tags$hr(),
       actionButton("goButton", "Run Analysis"),
-      downloadButton("downloadPlot", "Download Plot"),
-      br(),
-      br(),
-      downloadButton("downloadResults", "Download Text Results"),
-      br(),
-      br(),
+      tags$hr(),
       tags$p("Created by Andy Ring"),
-      tags$p("Version 1.0.2 | February, 7th 2025")
+      tags$p("Version 1.0.3 | February, 13th 2025")
     ), 
     
     mainPanel(
       layout_columns(
-        
         card(card_title("Growth Plot"),
              plotOutput("growthPlot")),
         
         card(card_title("Statistical Test Results"),
              tableOutput("statsTable")
-             ),
+        ),
         
         card(card_title("Regression Equations"),
              tableOutput("regressionEquations")),
         
         card(card_title("Growth Calculations"),
-             tableOutput("growthMetrics")),
-        
-        col_widths = c(12, 4, 4, 4)
+             tableOutput("growthMetrics"),
+             card_footer("Growth rate and doubling time units are determined by your Time variable. If your time variable is Hours, growth rate is per Hour and doubling time is in Hours")),
+        downloadButton("downloadPlot", "Download Plot"),
+        downloadButton("downloadResults", "Download Analysis Summary"),
+        col_widths = c(12, 4, 4, 4, 4, 4, -4)
       )
     )
   )
@@ -114,29 +114,26 @@ server <- function(input, output, session) {
   # Reactive Expression to Read Uploaded Data
   data <- reactive({
     req(input$data)
-    tryCatch(
-      {
-        df <- read.csv(input$data$datapath)
-        # Validate Columns
-        required_cols <- c("time", "growth", "group")
-        if (!all(required_cols %in% colnames(df))) {
-          stop("Missing required columns. Please ensure the CSV has 'time', 'growth', and 'group' columns.")
-        }
-        # Ensure correct data types
-        df$time <- as.numeric(df$time)
-        df$growth <- as.numeric(df$growth)
-        df$group <- as.factor(df$group)
-        return(df)
-      },
-      error = function(e) {
-        showModal(modalDialog(
-          title = "Data Upload Error",
-          paste("Error:", e$message),
-          easyClose = TRUE
-        ))
-        return(NULL)
+    tryCatch({
+      df <- read.csv(input$data$datapath)
+      # Validate Columns
+      required_cols <- c("time", "growth", "group")
+      if (!all(required_cols %in% colnames(df))) {
+        stop("Missing required columns. Please ensure the CSV has 'time', 'growth', and 'group' columns.")
       }
-    )
+      # Ensure correct data types
+      df$time <- as.numeric(df$time)
+      df$growth <- as.numeric(df$growth)
+      df$group <- as.factor(df$group)
+      return(df)
+    }, error = function(e) {
+      showModal(modalDialog(
+        title = "Data Upload Error",
+        paste("Error:", e$message),
+        easyClose = TRUE
+      ))
+      return(NULL)
+    })
   })
   
   # Recommend Best Statistical Test
@@ -204,69 +201,83 @@ server <- function(input, output, session) {
         .groups = 'drop'
       )
     
-    # Generate Polynomial Regression Equations (for display)
+    # Fit Logistic Growth Model for each group.
+    # If the logistic fit fails, fall back to an exponential model.
     regressionEquations <- summarizedData %>%
       group_by(group) %>%
       do({
-        if(n_distinct(.$time) >= 3) {
-          model <- tryCatch(lm(mean_growth ~ poly(time, 2), data = .), error = function(e) NULL)
-          if (!is.null(model)) {
-            coefs <- coef(model)
-            if(length(coefs) == 3) {
-              data.frame(
-                group = unique(.$group),
-                equation = sprintf("y = %.3fx² + %.3fx + %.3f", coefs[3], coefs[2], coefs[1])
-              )
-            } else {
-              data.frame(
-                group = unique(.$group),
-                equation = "Insufficient data for polynomial regression."
-              )
-            }
-          } else {
+        if(n_distinct(.$time) >= 3 && max(.$mean_growth, na.rm = TRUE) > 0) {
+          tryCatch({
+            # Initial estimates: K = max(mean_growth), r = 0.1, t0 = median(time)
+            start_vals <- list(K = max(.$mean_growth, na.rm = TRUE), 
+                               r = 0.1, 
+                               t0 = median(.$time, na.rm = TRUE))
+            logistic_model <- nls(mean_growth ~ K / (1 + exp(-r * (time - t0))),
+                                  data = .,
+                                  start = start_vals,
+                                  control = nls.control(maxiter = 100))
+            coefs <- coef(logistic_model)
+            equation_str <- sprintf("y = %.3f / (1 + exp(-%.3f*(x - %.3f)))", 
+                                    coefs["K"], coefs["r"], coefs["t0"])
             data.frame(
               group = unique(.$group),
-              equation = "Regression failed."
+              equation = equation_str,
+              K = coefs["K"],
+              r = coefs["r"],
+              t0 = coefs["t0"],
+              model_used = "Logistic"
             )
-          }
+          }, error = function(e) {
+            # Logistic model failed; fall back to exponential model
+            tryCatch({
+              exp_model <- lm(log(mean_growth) ~ time, data = .)
+              slope <- coef(exp_model)["time"]
+              intercept <- coef(exp_model)["(Intercept)"]
+              equation_str <- sprintf("y = exp(%.3f + %.3f*x)", intercept, slope)
+              data.frame(
+                group = unique(.$group),
+                equation = equation_str,
+                K = NA,
+                r = slope,
+                t0 = NA,
+                model_used = "Exponential fallback"
+              )
+            }, error = function(e2) {
+              data.frame(
+                group = unique(.$group),
+                equation = "Exponential model fit failed.",
+                K = NA,
+                r = NA,
+                t0 = NA,
+                model_used = "Exponential fallback"
+              )
+            })
+          })
         } else {
           data.frame(
             group = unique(.$group),
-            equation = "Insufficient data for polynomial regression."
+            equation = "Insufficient data for model fit.",
+            K = NA,
+            r = NA,
+            t0 = NA,
+            model_used = NA
           )
         }
       })
     
-    # Calculate Doubling Time and Growth Rate (Exponential Model)
-    doublingGrowth <- summarizedData %>%
-      group_by(group) %>%
-      do({
-        if(min(.$mean_growth, na.rm = TRUE) > 0 && n_distinct(.$time) >= 2) {
-          expModel <- tryCatch(lm(log(mean_growth) ~ time, data = .), error = function(e) NULL)
-          if (!is.null(expModel)) {
-            slope <- coef(expModel)["time"]
-            growth_rate <- slope
-            doubling_time <- log(2) / slope
-            data.frame(
-              group = unique(.$group),
-              growth_rate = growth_rate,
-              doubling_time = doubling_time
-            )
-          } else {
-            data.frame(
-              group = unique(.$group),
-              growth_rate = NA,
-              doubling_time = NA
-            )
-          }
-        } else {
-          data.frame(
-            group = unique(.$group),
-            growth_rate = NA,
-            doubling_time = NA
-          )
-        }
-      })
+    # Calculate Doubling Time and Growth Rate based on model used.
+    logisticMetrics <- regressionEquations %>%
+      mutate(growth_rate = r,
+             doubling_time = ifelse(!is.na(r) & r != 0, log(2) / r, NA)) %>%
+      select(group, growth_rate, doubling_time)
+    
+    # Create a note if any group had an exponential fallback
+    modelNote <- ""
+    if (any(regressionEquations$model_used == "Exponential fallback", na.rm = TRUE)) {
+      groups_expo <- paste(unique(regressionEquations$group[regressionEquations$model_used == "Exponential fallback"]), collapse = ", ")
+      modelNote <- paste("Note: Logistic model fit failed for group(s):", groups_expo, 
+                         ". Exponential model was used as fallback.")
+    }
     
     # Perform Selected Statistical Test (skip if "None" is selected)
     statsResult <- switch(input$statTest,
@@ -372,9 +383,10 @@ server <- function(input, output, session) {
     list(
       summarizedData = summarizedData,
       regressionEquations = regressionEquations,
-      doublingGrowth = doublingGrowth,
+      logisticMetrics = logisticMetrics,
       statsResult = statsResult,
-      annotations = annotations
+      annotations = annotations,
+      modelNote = modelNote
     )
   })
   
@@ -383,9 +395,31 @@ server <- function(input, output, session) {
     res <- analysisResults()
     req(res)
     
+    # Generate logistic predictions for each group for plotting the curve
+    logisticPredictions <- res$regressionEquations %>%
+      inner_join(
+        res$summarizedData %>% group_by(group) %>% summarise(min_time = min(time), max_time = max(time)),
+        by = "group"
+      ) %>%
+      group_by(group, K, r, t0, min_time, max_time) %>%
+      do({
+        times <- seq(.$min_time, .$max_time, length.out = 100)
+        # If logistic model was used, plot logistic curve; otherwise, plot exponential predictions
+        if (!is.na(.$t0)) {
+          preds <- .$K / (1 + exp(-.$r * (times - .$t0)))
+        } else {
+          # For exponential fallback, use the exponential equation stored in 'r' as slope and 'K' as NA
+          # Here, we need to recover the exponential predictions using the stored equation parameters.
+          # In this example, we'll simply use the exponential model:
+          intercept <- log(min(res$summarizedData$mean_growth, na.rm = TRUE))
+          preds <- exp(intercept + .$r * times)
+        }
+        data.frame(time = times, predicted = preds)
+      }) %>% ungroup()
+    
     p <- ggplot(res$summarizedData, aes(x = time, y = mean_growth, color = group)) +
       geom_point(size = 3) +  
-      geom_smooth(method = "lm", formula = y ~ poly(x, 2), se = FALSE, linewidth = 1) +  
+      geom_line(data = logisticPredictions, aes(x = time, y = predicted, color = group), size = 1) +
       geom_errorbar(aes(ymin = mean_growth - stderr, ymax = mean_growth + stderr), width = 0.2) +
       labs(
         title = input$plotTitle,
@@ -395,7 +429,6 @@ server <- function(input, output, session) {
       ) +
       theme(axis.title = element_text(size = 15, face = "bold"),
             plot.title = element_text(size = 30, face = "bold"))
-      
     
     if (nrow(res$annotations) > 0) {
       p <- p + geom_text(
@@ -413,17 +446,16 @@ server <- function(input, output, session) {
   output$regressionEquations <- renderTable({
     res <- analysisResults()
     req(res)
-    res$regressionEquations
+    res$regressionEquations %>% select(group, equation, model_used)
   })
   
   output$growthMetrics <- renderTable({
     res <- analysisResults()
     req(res)
-    res$doublingGrowth
+    res$logisticMetrics
   })
   
   output$statsTable <- renderTable({
-    # If "None" is selected, display a message.
     if (input$statTest == "none") {
       return(data.frame(Message = "No statistical test selected."))
     }
@@ -497,9 +529,26 @@ server <- function(input, output, session) {
       res <- analysisResults()
       req(res)
       
+      logisticPredictions <- res$regressionEquations %>%
+        inner_join(
+          res$summarizedData %>% group_by(group) %>% summarise(min_time = min(time), max_time = max(time)),
+          by = "group"
+        ) %>%
+        group_by(group, K, r, t0, min_time, max_time) %>%
+        do({
+          times <- seq(.$min_time, .$max_time, length.out = 100)
+          if (!is.na(.$t0)) {
+            preds <- .$K / (1 + exp(-.$r * (times - .$t0)))
+          } else {
+            intercept <- log(min(res$summarizedData$mean_growth, na.rm = TRUE))
+            preds <- exp(intercept + .$r * times)
+          }
+          data.frame(time = times, predicted = preds)
+        }) %>% ungroup()
+      
       p <- ggplot(res$summarizedData, aes(x = time, y = mean_growth, color = group)) +
         geom_point(size = 3) +  
-        geom_smooth(method = "lm", formula = y ~ poly(x, 2), se = FALSE, linewidth = 1) +  
+        geom_line(data = logisticPredictions, aes(x = time, y = predicted, color = group), size = 1) +
         geom_errorbar(aes(ymin = mean_growth - stderr, ymax = mean_growth + stderr), width = 0.2) +
         labs(
           title = input$plotTitle,
@@ -508,7 +557,7 @@ server <- function(input, output, session) {
           color = "Group"
         ) +
         theme(axis.title = element_text(size = 15, face = "bold"),
-              plot.title = element_text(size = 30, face = "bold"))+
+              plot.title = element_text(size = 30, face = "bold")) +
         theme_light()
       
       if (nrow(res$annotations) > 0) {
@@ -546,10 +595,14 @@ server <- function(input, output, session) {
       } else {
         print(res$statsResult)
       }
-      cat("\nPolynomial Regression Equations:\n")
+      cat("\nRegression Equations and Model Used:\n")
       print(res$regressionEquations)
-      cat("\nDoubling Time and Growth Rate (Exponential Model):\n")
-      print(res$doublingGrowth)
+      cat("\nDoubling Time and Growth Rate:\n")
+      print(res$logisticMetrics)
+      cat("\n")
+      if (nchar(res$modelNote) > 0) {
+        cat(res$modelNote, "\n")
+      }
       sink()
     }
   )
@@ -557,6 +610,8 @@ server <- function(input, output, session) {
 
 # Run the Shiny App
 shinyApp(ui = ui, server = server)
+
+
 
 
 
