@@ -1,4 +1,4 @@
-# Cell Growth Analysis Shiny App
+# Cell Growth Curve Analysis Tool
 
 ## Overview
 
