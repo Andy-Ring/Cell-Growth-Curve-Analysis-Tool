@@ -68,7 +68,7 @@ ui <- fluidPage(
       actionButton("goButton", "Run Analysis"),
       tags$hr(),
       tags$p("Created by Andy Ring"),
-      tags$p("Version 1.0.3 | February, 13th 2025")
+      tags$p("Version 1.0.4 | February, 14th 2025")
     ), 
     
     mainPanel(
@@ -269,7 +269,7 @@ server <- function(input, output, session) {
     logisticMetrics <- regressionEquations %>%
       mutate(growth_rate = r,
              doubling_time = ifelse(!is.na(r) & r != 0, log(2) / r, NA)) %>%
-      select(group, growth_rate, doubling_time)
+      dplyr::select(group, growth_rate, doubling_time)
     
     # Create a note if any group had an exponential fallback
     modelNote <- ""
@@ -446,7 +446,7 @@ server <- function(input, output, session) {
   output$regressionEquations <- renderTable({
     res <- analysisResults()
     req(res)
-    res$regressionEquations %>% select(group, equation, model_used)
+    res$regressionEquations %>% dplyr::select(group, equation, model_used)
   })
   
   output$growthMetrics <- renderTable({
@@ -610,9 +610,4 @@ server <- function(input, output, session) {
 
 # Run the Shiny App
 shinyApp(ui = ui, server = server)
-
-
-
-
-
 

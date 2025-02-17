@@ -5,7 +5,7 @@ account: andyring
 server: shinyapps.io
 hostUrl: https://api.shinyapps.io/v1
 appId: 13916917
-bundleId: 9796177
+bundleId: 9801802
 url: https://andyring.shinyapps.io/growth-curve-analysis-shiny-app/
 version: 1
 asMultiple: FALSE
