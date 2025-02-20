@@ -494,7 +494,7 @@ server <- function(input, output, session) {
     
     p <- ggplot(res$summarizedData, aes(x = time, y = mean_growth, color = group)) +
       geom_point(size = 3) +  
-      geom_line(data = predictions, aes(x = time, y = predicted, color = group), size = 1) +
+      geom_line(data = predictions, aes(x = time, y = predicted, color = group), linewidth = 1) +
       geom_errorbar(aes(ymin = mean_growth - stderr, ymax = mean_growth + stderr), width = 0.2) +
       labs(
         title = input$plotTitle,
@@ -626,7 +626,7 @@ server <- function(input, output, session) {
       
       p <- ggplot(res$summarizedData, aes(x = time, y = mean_growth, color = group)) +
         geom_point(size = 3) +  
-        geom_line(data = predictions, aes(x = time, y = predicted, color = group), size = 1) +
+        geom_line(data = predictions, aes(x = time, y = predicted, color = group), linewidth = 1) +
         geom_errorbar(aes(ymin = mean_growth - stderr, ymax = mean_growth + stderr), width = 0.2) +
         labs(
           title = input$plotTitle,
