@@ -42,12 +42,13 @@ ui <- fluidPage(
     sidebarPanel(
       HTML('<img src="logo.png" width="100%" height="auto">'),
       br(), br(),
-      downloadButton("downloadTemplate", "Download Template"),
-      tags$hr(),
+      # Column Mapping UI: Users map which columns represent time, growth, and group
       fileInput("data", "Upload Growth Data (CSV)", accept = ".csv"),
-      # New selectInput for choosing the growth model
+      uiOutput("col_select_ui"),
+      tags$hr(),
+      # Growth Model Selection including "None"
       selectInput("growthModel", "Select Growth Model", 
-                  choices = c("Logistic", "Exponential", "Polynomial"),
+                  choices = c("None", "Logistic", "Exponential", "Polynomial"),
                   selected = "Logistic"),
       tags$hr(),
       h4("Statistical Testing"),
@@ -64,7 +65,6 @@ ui <- fluidPage(
                     "Pairwise Wilcoxon" = "wilcox"
                   )
       ),
-      # Inputs for plot customization
       tags$hr(),
       h4("Plot Customization"),
       textInput("plotTitle", "Plot Title", value = "Cell Growth Over Time"),
@@ -74,7 +74,7 @@ ui <- fluidPage(
       actionButton("goButton", "Run Analysis"),
       tags$hr(),
       tags$p("Created by Andy Ring"),
-      tags$p("Version 1.1.0 | February, 20th 2025")
+      tags$p("Version 1.1.0 | March, 14th 2025")
     ), 
     
     mainPanel(
@@ -83,8 +83,7 @@ ui <- fluidPage(
              plotOutput("growthPlot")),
         
         card(card_title("Statistical Test Results"),
-             tableOutput("statsTable")
-        ),
+             tableOutput("statsTable")),
         
         card(card_title("Regression Equations"),
              tableOutput("regressionEquations")),
@@ -102,44 +101,33 @@ ui <- fluidPage(
 
 # Server Logic
 server <- function(input, output, session) {
-  # Function to Create Downloadable Template
-  createTemplate <- function() {
-    data.frame(
-      time = c(0, 1, 2, 3, 4, 5),
-      growth = rep(NA, 6),
-      group = rep("Control", 6)
-    )
-  }
   
-  # Download Handler for Template
-  output$downloadTemplate <- downloadHandler(
-    filename = function() { "growth_data_template.csv" },
-    content = function(file) { write.csv(createTemplate(), file, row.names = FALSE) }
-  )
-  
-  # Reactive Expression to Read Uploaded Data
-  data <- reactive({
+  # Create UI for Column Mapping based on uploaded data
+  output$col_select_ui <- renderUI({
     req(input$data)
-    tryCatch({
-      df <- read.csv(input$data$datapath)
-      # Validate Columns
-      required_cols <- c("time", "growth", "group")
-      if (!all(required_cols %in% colnames(df))) {
-        stop("Missing required columns. Please ensure the CSV has 'time', 'growth', and 'group' columns.")
-      }
-      # Ensure correct data types
-      df$time <- as.numeric(df$time)
-      df$growth <- as.numeric(df$growth)
-      df$group <- as.factor(df$group)
-      return(df)
-    }, error = function(e) {
-      showModal(modalDialog(
-        title = "Data Upload Error",
-        paste("Error:", e$message),
-        easyClose = TRUE
-      ))
-      return(NULL)
-    })
+    df <- read.csv(input$data$datapath)
+    cols <- names(df)
+    tagList(
+      selectInput("timeCol", "Select Time Column", 
+                  choices = cols, 
+                  selected = if("time" %in% cols) "time" else cols[1]),
+      selectInput("growthCol", "Select Growth Column", 
+                  choices = cols, 
+                  selected = if("growth" %in% cols) "growth" else if(length(cols) >= 2) cols[2] else cols[1]),
+      selectInput("groupCol", "Select Group Column", 
+                  choices = cols, 
+                  selected = if("group" %in% cols) "group" else if(length(cols) >= 3) cols[3] else cols[1])
+    )
+  })
+  
+  # Reactive Expression to Read Uploaded Data Using User-Defined Mapping
+  data <- reactive({
+    req(input$data, input$timeCol, input$growthCol, input$groupCol)
+    df <- read.csv(input$data$datapath)
+    df$time <- as.numeric(df[[input$timeCol]])
+    df$growth <- as.numeric(df[[input$growthCol]])
+    df$group <- as.factor(df[[input$groupCol]])
+    df
   })
   
   # Recommend Best Statistical Test
@@ -192,7 +180,7 @@ server <- function(input, output, session) {
     })
   })
   
-  # Use eventReactive to run the analysis when "Run Analysis" is clicked.
+  # Run the Analysis when "Run Analysis" is clicked.
   analysisResults <- eventReactive(input$goButton, {
     req(data())
     growthData <- data()
@@ -209,152 +197,149 @@ server <- function(input, output, session) {
     
     # Fit Growth Model for each group based on selected model type.
     modelType <- input$growthModel
-    regressionEquations <- summarizedData %>%
-      group_by(group) %>%
-      do({
-        if(n_distinct(.$time) >= 3 && max(.$mean_growth, na.rm = TRUE) > 0) {
-          if(modelType == "Logistic"){
-            tryCatch({
-              fit <- nlsLM(mean_growth ~ K / (1 + exp(-r * (time - t0))),
-                           data = .,
-                           start = list(K = max(.$mean_growth, na.rm = TRUE),
-                                        r = 0.1,
-                                        t0 = median(.$time, na.rm = TRUE)),
-                           control = nls.lm.control(maxiter = 200))
-              coefs <- coef(fit)
-              equation_str <- sprintf("y = %.3f / (1 + exp(-%.3f*(x - %.3f)))",
-                                      coefs["K"], coefs["r"], coefs["t0"])
+    if(modelType == "None"){
+      regressionEquations <- data.frame(
+        group = unique(summarizedData$group),
+        equation = "No model selected",
+        model_used = "None",
+        stringsAsFactors = FALSE
+      )
+      # Do not calculate growth rate and doubling time
+      growthMetrics <- data.frame(
+        group = unique(summarizedData$group),
+        growth_rate = NA,
+        doubling_time = NA
+      )
+    } else {
+      regressionEquations <- summarizedData %>%
+        group_by(group) %>%
+        do({
+          if(n_distinct(.$time) >= 3 && max(.$mean_growth, na.rm = TRUE) > 0) {
+            if(modelType == "Logistic"){
+              tryCatch({
+                fit <- nlsLM(mean_growth ~ K / (1 + exp(-r * (time - t0))),
+                             data = .,
+                             start = list(K = max(.$mean_growth, na.rm = TRUE),
+                                          r = 0.1,
+                                          t0 = median(.$time, na.rm = TRUE)),
+                             control = nls.lm.control(maxiter = 200))
+                coefs <- coef(fit)
+                equation_str <- sprintf("y = %.3f / (1 + exp(-%.3f*(x - %.3f)))",
+                                        coefs["K"], coefs["r"], coefs["t0"])
+                data.frame(
+                  group = unique(.$group),
+                  equation = equation_str,
+                  K = coefs["K"],
+                  r = coefs["r"],
+                  t0 = coefs["t0"],
+                  A = NA,
+                  b0 = NA,
+                  b1 = NA,
+                  b2 = NA,
+                  model_used = "Logistic (nlsLM)"
+                )
+              }, error = function(e) {
+                data.frame(
+                  group = unique(.$group),
+                  equation = "Logistic model fit failed.",
+                  K = NA,
+                  r = NA,
+                  t0 = NA,
+                  A = NA,
+                  b0 = NA,
+                  b1 = NA,
+                  b2 = NA,
+                  model_used = "Logistic (nlsLM)"
+                )
+              })
+            } else if(modelType == "Exponential"){
+              tryCatch({
+                fit <- nlsLM(mean_growth ~ A * exp(r * time),
+                             data = .,
+                             start = list(A = .$mean_growth[which.min(.$time)],
+                                          r = 0.1),
+                             control = nls.lm.control(maxiter = 200))
+                coefs <- coef(fit)
+                equation_str <- sprintf("y = %.3f * exp(%.3f*x)",
+                                        coefs["A"], coefs["r"])
+                data.frame(
+                  group = unique(.$group),
+                  equation = equation_str,
+                  A = coefs["A"],
+                  r = coefs["r"],
+                  t0 = NA,
+                  K = NA,
+                  b0 = NA,
+                  b1 = NA,
+                  b2 = NA,
+                  model_used = "Exponential (nlsLM)"
+                )
+              }, error = function(e) {
+                data.frame(
+                  group = unique(.$group),
+                  equation = "Exponential model fit failed.",
+                  A = NA,
+                  r = NA,
+                  t0 = NA,
+                  K = NA,
+                  b0 = NA,
+                  b1 = NA,
+                  b2 = NA,
+                  model_used = "Exponential (nlsLM)"
+                )
+              })
+            } else if(modelType == "Polynomial"){
+              tryCatch({
+                fit <- lm(mean_growth ~ poly(time, 2, raw = TRUE), data = .)
+                coefs <- coef(fit)
+                equation_str <- sprintf("y = %.3f + %.3f*x + %.3f*x^2",
+                                        coefs[1], coefs[2], coefs[3])
+                data.frame(
+                  group = unique(.$group),
+                  equation = equation_str,
+                  b0 = coefs[1],
+                  b1 = coefs[2],
+                  b2 = coefs[3],
+                  K = NA,
+                  r = NA,
+                  t0 = NA,
+                  A = NA,
+                  model_used = "Polynomial (lm)"
+                )
+              }, error = function(e) {
+                data.frame(
+                  group = unique(.$group),
+                  equation = "Polynomial model fit failed.",
+                  b0 = NA,
+                  b1 = NA,
+                  b2 = NA,
+                  K = NA,
+                  r = NA,
+                  t0 = NA,
+                  A = NA,
+                  model_used = "Polynomial (lm)"
+                )
+              })
+            } else {
               data.frame(
                 group = unique(.$group),
-                equation = equation_str,
-                K = coefs["K"],
-                r = coefs["r"],
-                t0 = coefs["t0"],
-                A = NA,
-                b0 = NA,
-                b1 = NA,
-                b2 = NA,
-                model_used = "Logistic (nlsLM)"
+                equation = "Unknown model type.",
+                model_used = NA
               )
-            }, error = function(e) {
-              data.frame(
-                group = unique(.$group),
-                equation = "Logistic model fit failed.",
-                K = NA,
-                r = NA,
-                t0 = NA,
-                A = NA,
-                b0 = NA,
-                b1 = NA,
-                b2 = NA,
-                model_used = "Logistic (nlsLM)"
-              )
-            })
-          } else if(modelType == "Exponential"){
-            tryCatch({
-              # Exponential model: y = A * exp(r * time)
-              fit <- nlsLM(mean_growth ~ A * exp(r * time),
-                           data = .,
-                           start = list(A = .$mean_growth[which.min(.$time)],
-                                        r = 0.1),
-                           control = nls.lm.control(maxiter = 200))
-              coefs <- coef(fit)
-              equation_str <- sprintf("y = %.3f * exp(%.3f*x)",
-                                      coefs["A"], coefs["r"])
-              data.frame(
-                group = unique(.$group),
-                equation = equation_str,
-                A = coefs["A"],
-                r = coefs["r"],
-                t0 = NA,
-                K = NA,
-                b0 = NA,
-                b1 = NA,
-                b2 = NA,
-                model_used = "Exponential (nlsLM)"
-              )
-            }, error = function(e) {
-              data.frame(
-                group = unique(.$group),
-                equation = "Exponential model fit failed.",
-                A = NA,
-                r = NA,
-                t0 = NA,
-                K = NA,
-                b0 = NA,
-                b1 = NA,
-                b2 = NA,
-                model_used = "Exponential (nlsLM)"
-              )
-            })
-          } else if(modelType == "Polynomial"){
-            tryCatch({
-              # Fit quadratic polynomial model: y = beta0 + beta1*x + beta2*x^2
-              fit <- lm(mean_growth ~ poly(time, 2, raw = TRUE), data = .)
-              coefs <- coef(fit)
-              equation_str <- sprintf("y = %.3f + %.3f*x + %.3f*x^2",
-                                      coefs[1], coefs[2], coefs[3])
-              data.frame(
-                group = unique(.$group),
-                equation = equation_str,
-                b0 = coefs[1],
-                b1 = coefs[2],
-                b2 = coefs[3],
-                K = NA,
-                r = NA,
-                t0 = NA,
-                A = NA,
-                model_used = "Polynomial (lm)"
-              )
-            }, error = function(e) {
-              data.frame(
-                group = unique(.$group),
-                equation = "Polynomial model fit failed.",
-                b0 = NA,
-                b1 = NA,
-                b2 = NA,
-                K = NA,
-                r = NA,
-                t0 = NA,
-                A = NA,
-                model_used = "Polynomial (lm)"
-              )
-            })
+            }
           } else {
             data.frame(
               group = unique(.$group),
-              equation = "Unknown model type.",
-              K = NA,
-              r = NA,
-              t0 = NA,
-              A = NA,
-              b0 = NA,
-              b1 = NA,
-              b2 = NA,
+              equation = "Insufficient data for model fit.",
               model_used = NA
             )
           }
-        } else {
-          data.frame(
-            group = unique(.$group),
-            equation = "Insufficient data for model fit.",
-            K = NA,
-            r = NA,
-            t0 = NA,
-            A = NA,
-            b0 = NA,
-            b1 = NA,
-            b2 = NA,
-            model_used = NA
-          )
-        }
-      })
-    
-    # Calculate Doubling Time and Growth Rate (only for logistic and exponential models)
-    growthMetrics <- regressionEquations %>%
-      mutate(growth_rate = ifelse(model_used %in% c("Logistic (nlsLM)", "Exponential (nlsLM)"), r, NA),
-             doubling_time = ifelse(model_used %in% c("Logistic (nlsLM)", "Exponential (nlsLM)") & !is.na(r) & r != 0, log(2) / r, NA)) %>%
-      dplyr::select(group, growth_rate, doubling_time)
+        })
+      growthMetrics <- regressionEquations %>%
+        mutate(growth_rate = ifelse(model_used %in% c("Logistic (nlsLM)", "Exponential (nlsLM)"), r, NA),
+               doubling_time = ifelse(model_used %in% c("Logistic (nlsLM)", "Exponential (nlsLM)") & !is.na(r) & r != 0, log(2) / r, NA)) %>%
+        dplyr::select(group, growth_rate, doubling_time)
+    }
     
     # Perform Selected Statistical Test (skip if "None" is selected)
     statsResult <- switch(input$statTest,
@@ -471,32 +456,41 @@ server <- function(input, output, session) {
     res <- analysisResults()
     req(res)
     
-    # Generate predictions for each group for plotting the curve,
-    # handling each model type separately.
-    predictions <- res$regressionEquations %>%
-      inner_join(
-        res$summarizedData %>% group_by(group) %>% summarise(min_time = min(time), max_time = max(time)),
-        by = "group"
-      ) %>%
-      group_by(group, model_used) %>%
-      do({
-        times <- seq(.$min_time, .$max_time, length.out = 100)
-        if (.$model_used == "Logistic (nlsLM)") {
-          preds <- .$K / (1 + exp(-.$r * (times - .$t0)))
-        } else if (.$model_used == "Exponential (nlsLM)") {
-          preds <- .$A * exp(.$r * times)
-        } else if (.$model_used == "Polynomial (lm)") {
-          preds <- .$b0 + .$b1 * times + .$b2 * times^2
-        } else {
-          preds <- NA
-        }
-        data.frame(time = times, predicted = preds)
-      }) %>% ungroup()
+    # If "None" is selected, simply plot the summarized data and connect points by group.
+    if (input$growthModel == "None") {
+      p <- ggplot(res$summarizedData, aes(x = time, y = mean_growth, color = group)) +
+        geom_point(size = 3) +
+        geom_line(size = 1) +
+        geom_errorbar(aes(ymin = mean_growth - stderr, ymax = mean_growth + stderr), width = 0.2)
+    } else {
+      # For a fitted model, generate predictions for plotting.
+      predictions <- res$regressionEquations %>%
+        inner_join(
+          res$summarizedData %>% group_by(group) %>% summarise(min_time = min(time), max_time = max(time)),
+          by = "group"
+        ) %>%
+        group_by(group, model_used) %>%
+        do({
+          times <- seq(.$min_time, .$max_time, length.out = 100)
+          if (.$model_used == "Logistic (nlsLM)") {
+            preds <- .$K / (1 + exp(-.$r * (times - .$t0)))
+          } else if (.$model_used == "Exponential (nlsLM)") {
+            preds <- .$A * exp(.$r * times)
+          } else if (.$model_used == "Polynomial (lm)") {
+            preds <- .$b0 + .$b1 * times + .$b2 * times^2
+          } else {
+            preds <- NA
+          }
+          data.frame(time = times, predicted = preds)
+        }) %>% ungroup()
+      
+      p <- ggplot(res$summarizedData, aes(x = time, y = mean_growth, color = group)) +
+        geom_point(size = 3) +
+        geom_line(data = predictions, aes(x = time, y = predicted, color = group), linewidth = 1) +
+        geom_errorbar(aes(ymin = mean_growth - stderr, ymax = mean_growth + stderr), width = 0.2)
+    }
     
-    p <- ggplot(res$summarizedData, aes(x = time, y = mean_growth, color = group)) +
-      geom_point(size = 3) +  
-      geom_line(data = predictions, aes(x = time, y = predicted, color = group), linewidth = 1) +
-      geom_errorbar(aes(ymin = mean_growth - stderr, ymax = mean_growth + stderr), width = 0.2) +
+    p <- p +
       labs(
         title = input$plotTitle,
         x = input$xLabel,
@@ -605,29 +599,35 @@ server <- function(input, output, session) {
       res <- analysisResults()
       req(res)
       
-      predictions <- res$regressionEquations %>%
-        inner_join(
-          res$summarizedData %>% group_by(group) %>% summarise(min_time = min(time), max_time = max(time)),
-          by = "group"
-        ) %>%
-        group_by(group, model_used) %>%
-        do({
-          times <- seq(.$min_time, .$max_time, length.out = 100)
-          if (.$model_used == "Logistic (nlsLM)") {
-            preds <- .$K / (1 + exp(-.$r * (times - .$t0)))
-          } else if (.$model_used == "Exponential (nlsLM)") {
-            preds <- .$A * exp(.$r * times)
-          } else if (.$model_used == "Polynomial (lm)") {
-            preds <- .$b0 + .$b1 * times + .$b2 * times^2
-          } else {
-            preds <- NA
-          }
-          data.frame(time = times, predicted = preds)
-        }) %>% ungroup()
+      if (input$growthModel == "None") {
+        predictions <- res$summarizedData
+      } else {
+        predictions <- res$regressionEquations %>%
+          inner_join(
+            res$summarizedData %>% group_by(group) %>% summarise(min_time = min(time), max_time = max(time)),
+            by = "group"
+          ) %>%
+          group_by(group, model_used) %>%
+          do({
+            times <- seq(.$min_time, .$max_time, length.out = 100)
+            if (.$model_used == "Logistic (nlsLM)") {
+              preds <- .$K / (1 + exp(-.$r * (times - .$t0)))
+            } else if (.$model_used == "Exponential (nlsLM)") {
+              preds <- .$A * exp(.$r * times)
+            } else if (.$model_used == "Polynomial (lm)") {
+              preds <- .$b0 + .$b1 * times + .$b2 * times^2
+            } else {
+              preds <- NA
+            }
+            data.frame(time = times, predicted = preds)
+          }) %>% ungroup()
+      }
       
       p <- ggplot(res$summarizedData, aes(x = time, y = mean_growth, color = group)) +
         geom_point(size = 3) +  
-        geom_line(data = predictions, aes(x = time, y = predicted, color = group), linewidth = 1) +
+        geom_line(data = if (input$growthModel == "None") res$summarizedData else predictions, 
+                  aes(x = time, y = if (input$growthModel == "None") mean_growth else predicted, color = group), 
+                  linewidth = 1) +
         geom_errorbar(aes(ymin = mean_growth - stderr, ymax = mean_growth + stderr), width = 0.2) +
         labs(
           title = input$plotTitle,
